@@ -202,11 +202,13 @@ contract Save is ReentrancyGuard {
 }
 
 contract SaveFactory {
+    uint256 public constant MAX_NAME_LENGTH = 32;
+
     mapping(address => address[]) public safesByOwner;
     mapping(address => string) public safeNames;
     mapping(address => address[3]) public safeOwners;
 
-    event SaveCreated(address save, address[3] owners);
+    event SaveCreated(address indexed save, address[3] owners);
     event SafeRenamed(address indexed safe, string name);
 
     function createSave(address[3] memory owners) external payable returns (address) {
@@ -233,6 +235,7 @@ contract SaveFactory {
             msg.sender == owners[0] || msg.sender == owners[1] || msg.sender == owners[2],
             "not owner"
         );
+        require(bytes(name).length <= MAX_NAME_LENGTH, "name too long");
         safeNames[safe] = name;
         emit SafeRenamed(safe, name);
     }
