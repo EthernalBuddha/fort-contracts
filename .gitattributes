@@ -1,0 +1,16 @@
+# Solidity sources must stay byte-identical across machines: their content is hashed
+# into the contract metadata, and a CRLF checkout would break bytecode verification.
+* text=auto eol=lf
+
+*.sol text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Never touched by newline normalization.
+*.png binary
+*.jpg binary
+*.gz binary
+*.zip binary
