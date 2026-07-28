@@ -11,7 +11,7 @@ error ZeroOwner();
 error OwnersMustDiffer();
 /// @dev Thrown when a transaction id is out of range.
 error BadId();
-/// @dev Thrown when the recipient is the zero address.
+/// @dev Thrown when the recipient is the zero address or the safe itself.
 error BadRecipient();
 /// @dev Thrown when a transaction carries neither value nor calldata.
 error EmptyTransaction();
@@ -43,6 +43,14 @@ error InsufficientBalance();
 error TransferFailed();
 /// @dev Thrown when a safe name exceeds MAX_NAME_LENGTH bytes.
 error NameTooLong();
+
+/// @dev Reverts unless all three owners are non-zero and distinct.
+/// Shared by Save and SaveFactory. Free functions are always internal,
+/// so no visibility keyword may be given here.
+function _validateOwners(address[3] memory o) pure {
+    if (o[0] == address(0) || o[1] == address(0) || o[2] == address(0)) revert ZeroOwner();
+    if (o[0] == o[1] || o[0] == o[2] || o[1] == o[2]) revert OwnersMustDiffer();
+}
 
 /// @title Save
 /// @notice A 2-of-3 multisig safe: three fixed owners, two confirmations to execute.
@@ -160,12 +168,6 @@ contract Save is ReentrancyGuard {
         emit Deposit(msg.sender, msg.value, address(this).balance);
     }
 
-    /// @dev Reverts unless all three owners are non-zero and distinct.
-    function _validateOwners(address[3] memory o) internal pure {
-        if (o[0] == address(0) || o[1] == address(0) || o[2] == address(0)) revert ZeroOwner();
-        if (o[0] == o[1] || o[0] == o[2] || o[1] == o[2]) revert OwnersMustDiffer();
-    }
-
     /// @dev Reverts unless the caller is one of the three owners.
     function _onlyOwner() internal view {
         if (!isOwner(msg.sender)) revert NotOwner();
@@ -232,7 +234,9 @@ contract Save is ReentrancyGuard {
     }
 
     /// @notice Batch read: one RPC call instead of one per entry.
-    /// @dev Each entry carries up to MAX_DATA_LENGTH bytes of calldata, so keep count small.
+    /// @dev Deprecated for list rendering: each entry carries up to MAX_DATA_LENGTH bytes of
+    /// calldata, so a wide range can return hundreds of kilobytes. Prefer getTxSummaries and
+    /// fetch calldata per transaction with getTxFull when it is actually needed.
     /// @param from Starting transaction id.
     /// @param count How many entries to return; the tail beyond the array is truncated.
     /// @return The requested transaction views.
@@ -344,9 +348,12 @@ contract Save is ReentrancyGuard {
     }
 
     /// @dev Shared creation path: validates input, reserves the amount, appends the record.
+    /// Self-calls are rejected: every state-changing entry point is owner-gated, so a call
+    /// from the safe to itself could only ever revert, and forbidding it closes the whole class.
     function _createTx(address to, uint256 amount, bytes memory data) internal returns (uint256) {
         _onlyOwner();
         if (to == address(0)) revert BadRecipient();
+        if (to == address(this)) revert BadRecipient();
         if (amount == 0 && data.length == 0) revert EmptyTransaction();
         if (data.length > MAX_DATA_LENGTH) revert DataTooLong();
 
@@ -507,8 +514,9 @@ contract SaveFactory {
     /// @notice Safes indexed by owner address.
     mapping(address => address[]) public safesByOwner;
 
-    /// @notice Optional display name per safe.
-    mapping(address => string) public safeNames;
+    /// @dev Optional display name per safe. Read through getSafeName; the automatic
+    /// getter is omitted because it would duplicate that function exactly.
+    mapping(address => string) internal safeNames;
 
     /// @notice Owners recorded per safe at creation time.
     mapping(address => address[3]) public safeOwners;
@@ -568,11 +576,5 @@ contract SaveFactory {
     /// @return The safe name.
     function getSafeName(address safe) external view returns (string memory) {
         return safeNames[safe];
-    }
-
-    /// @dev Reverts unless all three owners are non-zero and distinct.
-    function _validateOwners(address[3] memory o) internal pure {
-        if (o[0] == address(0) || o[1] == address(0) || o[2] == address(0)) revert ZeroOwner();
-        if (o[0] == o[1] || o[0] == o[2] || o[1] == o[2]) revert OwnersMustDiffer();
     }
 }
