@@ -32,7 +32,7 @@ contract Save is ReentrancyGuard {
         bytes data;
     }
 
-    /// Читается через getTx / getTxFull / getTxs — публичного геттера нет намеренно.
+    /// Read via getTx / getTxFull / getTxs - the public getter is omitted on purpose.
     Tx[] internal txs;
 
     mapping(uint256 => mapping(address => bool)) public confirmed;
@@ -42,11 +42,11 @@ contract Save is ReentrancyGuard {
     mapping(uint256 => uint8) public cancelVotes;
     mapping(uint256 => mapping(address => bool)) public cancelVoted;
 
-    /// Сумма amount по всем созданным, но не исполненным и не отменённым транзакциям.
-    /// Не даёт создать обязательств больше, чем есть на балансе.
+    /// Total amount across all created transactions that are neither executed nor canceled.
+    /// Prevents committing more funds than the contract currently holds.
     uint256 public pendingAmount;
 
-    /// Плоский снимок транзакции для чтения одним вызовом.
+    /// Flat transaction snapshot, readable in a single call.
     struct TxView {
         uint256 id;
         address to;
@@ -103,13 +103,13 @@ contract Save is ReentrancyGuard {
         return txs.length;
     }
 
-    /// Свободный баланс: то, что ещё не обещано созданным транзакциям.
+    /// Free balance: whatever is not already reserved by created transactions.
     function availableBalance() external view returns (uint256) {
         uint256 bal = address(this).balance;
         return bal > pendingAmount ? bal - pendingAmount : 0;
     }
 
-    /// Прежняя сигнатура — сохранена, чтобы не ломать существующий фронт.
+    /// Legacy signature, kept so the existing frontend does not break.
     function getTx(uint256 id)
         external
         view
@@ -125,8 +125,8 @@ contract Save is ReentrancyGuard {
         return _txView(id);
     }
 
-    /// Пакетное чтение: одна транзакция RPC вместо одной на каждую запись.
-    /// from — начальный id, count — сколько вернуть. Хвост за пределами массива обрезается.
+    /// Batch read: one RPC call instead of one per entry.
+    /// from is the starting id, count is how many to return. The tail beyond the array is truncated.
     function getTxs(uint256 from, uint256 count) external view returns (TxView[] memory) {
         uint256 len = txs.length;
         if (from >= len || count == 0) {
@@ -168,7 +168,7 @@ contract Save is ReentrancyGuard {
         return confirmed[id][owner];
     }
 
-    /// Кто из трёх владельцев подтвердил — одним вызовом, в порядке owners.
+    /// Which of the three owners confirmed, in a single call, in owners order.
     function getConfirms(uint256 id) external view returns (bool[3] memory) {
         require(id < txs.length, "bad id");
         return [
@@ -178,12 +178,12 @@ contract Save is ReentrancyGuard {
         ];
     }
 
-    /// Простой перевод. Оставлено для совместимости с текущим фронтом.
+    /// Plain transfer. Kept for compatibility with the current frontend.
     function createTx(address to, uint256 amount) external returns (uint256) {
         return _createTx(to, amount, "");
     }
 
-    /// Перевод с произвольным calldata — сейф может вызывать другие контракты.
+    /// Transfer with arbitrary calldata - the safe can call other contracts.
     function createTx(address to, uint256 amount, bytes calldata data) external returns (uint256) {
         return _createTx(to, amount, data);
     }
@@ -247,9 +247,9 @@ contract Save is ReentrancyGuard {
         emit TxRevoked(id, msg.sender, t.confirms);
     }
 
-    /// Отмена требует THRESHOLD голосов владельцев.
-    /// Исключение: автор отменяет свою транзакцию в одиночку,
-    /// пока её не подтвердил никто, кроме него самого.
+    /// Cancellation requires THRESHOLD owner votes.
+    /// Exception: the proposer can cancel their own transaction alone,
+    /// as long as nobody else has confirmed it.
     function cancelTx(uint256 id) external {
         require(isOwner(msg.sender), "not owner");
         require(id < txs.length, "bad id");
