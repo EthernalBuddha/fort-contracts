@@ -41,7 +41,7 @@ contract PendingTest is Test {
         assertEq(save.availableBalance(), 4 ether);
 
         vm.prank(b);
-        vm.expectRevert("exceeds available balance");
+        vm.expectRevert(ExceedsAvailableBalance.selector);
         save.createTx(dest, 5 ether);
     }
 
@@ -66,9 +66,12 @@ contract PendingTest is Test {
         vm.prank(a);
         uint256 id = save.createTx(dest, 6 ether);
 
-        vm.prank(a); save.confirmTx(id);
-        vm.prank(b); save.confirmTx(id);
-        vm.prank(a); save.executeTx(id);
+        vm.prank(a);
+        save.confirmTx(id);
+        vm.prank(b);
+        save.confirmTx(id);
+        vm.prank(a);
+        save.executeTx(id);
 
         assertEq(dest.balance, 6 ether);
         assertEq(save.pendingAmount(), 0);
@@ -81,13 +84,15 @@ contract PendingTest is Test {
         vm.prank(a);
         uint256 id = save.createTx(dest, 4 ether);
 
-        vm.prank(b); save.cancelTx(id);
-        vm.prank(c); save.cancelTx(id); // два голоса — отменена
+        vm.prank(b);
+        save.cancelTx(id);
+        vm.prank(c); // два голоса — отменена
+        save.cancelTx(id);
 
         assertEq(save.pendingAmount(), 0);
 
         vm.prank(a);
-        vm.expectRevert("already canceled");
+        vm.expectRevert(TransactionCanceled.selector);
         save.cancelTx(id);
 
         assertEq(save.pendingAmount(), 0);
@@ -107,11 +112,14 @@ contract PendingTest is Test {
         assertEq(uint256(v1.createdBlock), 1000);
         assertEq(uint256(v1.executedBlock), 0);
 
-        vm.prank(a); save.confirmTx(id);
-        vm.prank(b); save.confirmTx(id);
+        vm.prank(a);
+        save.confirmTx(id);
+        vm.prank(b);
+        save.confirmTx(id);
 
         vm.roll(1042);
-        vm.prank(a); save.executeTx(id);
+        vm.prank(a);
+        save.executeTx(id);
 
         Save.TxView memory v2 = save.getTxFull(id);
         assertEq(uint256(v2.createdBlock), 1000);
@@ -122,12 +130,17 @@ contract PendingTest is Test {
 
     // getTxs отдаёт всё одним вызовом, включая кто подтвердил.
     function test_GetTxsBatch() public {
-        vm.prank(a); uint256 id0 = save.createTx(dest, 1 ether);
-        vm.prank(b); uint256 id1 = save.createTx(dest, 2 ether);
-        vm.prank(c); save.createTx(dest, 3 ether);
+        vm.prank(a);
+        uint256 id0 = save.createTx(dest, 1 ether);
+        vm.prank(b);
+        uint256 id1 = save.createTx(dest, 2 ether);
+        vm.prank(c);
+        save.createTx(dest, 3 ether);
 
-        vm.prank(a); save.confirmTx(id1);
-        vm.prank(c); save.confirmTx(id1);
+        vm.prank(a);
+        save.confirmTx(id1);
+        vm.prank(c);
+        save.confirmTx(id1);
 
         Save.TxView[] memory list = save.getTxs(0, 10);
         assertEq(list.length, 3);
@@ -139,17 +152,19 @@ contract PendingTest is Test {
 
         assertEq(list[1].amount, 2 ether);
         assertEq(list[1].confirms, 2);
-        assertTrue(list[1].confirmedBy[0]);  // a
+        assertTrue(list[1].confirmedBy[0]); // a
         assertFalse(list[1].confirmedBy[1]); // b не подтверждал
-        assertTrue(list[1].confirmedBy[2]);  // c
+        assertTrue(list[1].confirmedBy[2]); // c
 
         assertEq(list[2].amount, 3 ether);
     }
 
     // Срез и выход за границы не ломают вызов.
     function test_GetTxsBounds() public {
-        vm.prank(a); save.createTx(dest, 1 ether);
-        vm.prank(a); save.createTx(dest, 1 ether);
+        vm.prank(a);
+        save.createTx(dest, 1 ether);
+        vm.prank(a);
+        save.createTx(dest, 1 ether);
 
         assertEq(save.getTxs(1, 5).length, 1);
         assertEq(save.getTxs(5, 5).length, 0);
@@ -161,7 +176,8 @@ contract PendingTest is Test {
         vm.prank(a);
         uint256 id = save.createTx(dest, 1 ether);
 
-        vm.prank(b); save.confirmTx(id);
+        vm.prank(b);
+        save.confirmTx(id);
 
         bool[3] memory f = save.getConfirms(id);
         assertFalse(f[0]);
@@ -178,9 +194,12 @@ contract PendingTest is Test {
         vm.prank(a);
         uint256 id = save.createTx(address(target), 1 ether, data);
 
-        vm.prank(a); save.confirmTx(id);
-        vm.prank(b); save.confirmTx(id);
-        vm.prank(a); save.executeTx(id);
+        vm.prank(a);
+        save.confirmTx(id);
+        vm.prank(b);
+        save.confirmTx(id);
+        vm.prank(a);
+        save.executeTx(id);
 
         assertEq(target.pings(), 1);
         assertEq(target.received(), 1 ether);
@@ -196,9 +215,12 @@ contract PendingTest is Test {
 
         assertEq(save.pendingAmount(), 0);
 
-        vm.prank(a); save.confirmTx(id);
-        vm.prank(b); save.confirmTx(id);
-        vm.prank(a); save.executeTx(id);
+        vm.prank(a);
+        save.confirmTx(id);
+        vm.prank(b);
+        save.confirmTx(id);
+        vm.prank(a);
+        save.executeTx(id);
 
         assertEq(target.pings(), 1);
         assertEq(target.received(), 0);
@@ -207,7 +229,7 @@ contract PendingTest is Test {
     // Пустая транзакция — ни суммы, ни вызова — отклоняется.
     function test_EmptyTxReverts() public {
         vm.prank(a);
-        vm.expectRevert("empty tx");
+        vm.expectRevert(EmptyTransaction.selector);
         save.createTx(dest, 0, "");
     }
 
@@ -216,7 +238,7 @@ contract PendingTest is Test {
         bytes memory big = new bytes(4097);
 
         vm.prank(a);
-        vm.expectRevert("data too long");
+        vm.expectRevert(DataTooLong.selector);
         save.createTx(dest, 1 ether, big);
     }
 
@@ -236,7 +258,7 @@ contract PendingTest is Test {
         address stranger = makeAddr("stranger");
 
         vm.prank(stranger);
-        vm.expectRevert("not owner");
+        vm.expectRevert(NotOwner.selector);
         save.createTx(dest, 1 ether, abi.encodeWithSignature("ping()"));
     }
 }

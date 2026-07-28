@@ -1,27 +1,67 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity 0.8.35;
 
-abstract contract ReentrancyGuard {
-    uint256 private _status;
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-    constructor() {
-        _status = 1;
-    }
+/// @dev Thrown when the caller is not one of the three safe owners.
+error NotOwner();
+/// @dev Thrown when an owner address is the zero address.
+error ZeroOwner();
+/// @dev Thrown when the three owner addresses are not all distinct.
+error OwnersMustDiffer();
+/// @dev Thrown when a transaction id is out of range.
+error BadId();
+/// @dev Thrown when the recipient is the zero address.
+error BadRecipient();
+/// @dev Thrown when a transaction carries neither value nor calldata.
+error EmptyTransaction();
+/// @dev Thrown when calldata exceeds MAX_DATA_LENGTH.
+error DataTooLong();
+/// @dev Thrown when a new transaction would reserve more than the free balance.
+error ExceedsAvailableBalance();
+/// @dev Thrown when the transaction has already been executed.
+error AlreadyExecuted();
+/// @dev Thrown when the transaction has already been canceled.
+error TransactionCanceled();
+/// @dev Thrown when the caller has already confirmed the transaction.
+error AlreadyConfirmed();
+/// @dev Thrown when the caller has not confirmed the transaction.
+error NotConfirmed();
+/// @dev Thrown when there is no confirmation left to revoke.
+error NoConfirmations();
+/// @dev Thrown when the caller has already voted to cancel.
+error AlreadyVotedToCancel();
+/// @dev Thrown when the caller has not voted to cancel.
+error NotVotedToCancel();
+/// @dev Thrown when there is no cancel vote left to revoke.
+error NoCancelVotes();
+/// @dev Thrown when the transaction has fewer than THRESHOLD confirmations.
+error NotEnoughConfirmations();
+/// @dev Thrown when the safe balance is lower than the transaction amount.
+error InsufficientBalance();
+/// @dev Thrown when the outbound call fails.
+error TransferFailed();
+/// @dev Thrown when a safe name exceeds MAX_NAME_LENGTH bytes.
+error NameTooLong();
 
-    modifier nonReentrant() {
-        require(_status == 1, "reentrant");
-        _status = 2;
-        _;
-        _status = 1;
-    }
-}
-
+/// @title Save
+/// @notice A 2-of-3 multisig safe: three fixed owners, two confirmations to execute.
+/// @dev Owners and threshold are set at construction and cannot change. Moving to
+/// N-of-M would change the constructor, the factory and the frontend, so it is out of scope.
+/// Reentrancy protection comes from OpenZeppelin's ReentrancyGuard; executeTx also
+/// follows checks-effects-interactions, so the guard is a second line of defence.
 contract Save is ReentrancyGuard {
+    /// @notice Number of confirmations required to execute or cancel a transaction.
     uint8 public constant THRESHOLD = 2;
+
+    /// @notice Maximum calldata size, in bytes, accepted by a transaction.
     uint256 public constant MAX_DATA_LENGTH = 4096;
 
+    /// @notice The three safe owners, in the order given at construction.
     address[3] public owners;
 
+    /// @notice Stored transaction record.
+    /// @dev executedBlock stays 0 until the transaction is executed.
     struct Tx {
         address to;
         uint256 amount;
@@ -32,21 +72,30 @@ contract Save is ReentrancyGuard {
         bytes data;
     }
 
-    /// Read via getTx / getTxFull / getTxs - the public getter is omitted on purpose.
+    /// @dev Read via getTx / getTxFull / getTxs - the public getter is omitted on purpose.
     Tx[] internal txs;
 
+    /// @notice Whether a given owner has confirmed a given transaction.
     mapping(uint256 => mapping(address => bool)) public confirmed;
+
+    /// @notice Whether a given transaction has been canceled.
     mapping(uint256 => bool) public canceled;
 
+    /// @notice The owner that created a given transaction.
     mapping(uint256 => address) public proposer;
+
+    /// @notice Number of cancel votes collected for a given transaction.
     mapping(uint256 => uint8) public cancelVotes;
+
+    /// @notice Whether a given owner has voted to cancel a given transaction.
     mapping(uint256 => mapping(address => bool)) public cancelVoted;
 
-    /// Total amount across all created transactions that are neither executed nor canceled.
-    /// Prevents committing more funds than the contract currently holds.
+    /// @notice Total amount across all created transactions that are neither executed nor canceled.
+    /// @dev Prevents committing more funds than the contract currently holds.
     uint256 public pendingAmount;
 
-    /// Flat transaction snapshot, readable in a single call.
+    /// @notice Flat transaction snapshot, readable in a single call.
+    /// @dev Includes calldata; for large histories prefer getTxSummaries.
     struct TxView {
         uint256 id;
         address to;
@@ -62,15 +111,42 @@ contract Save is ReentrancyGuard {
         bytes data;
     }
 
+    /// @notice Transaction snapshot without calldata, for cheap list rendering.
+    /// @dev Response size is bounded, unlike TxView which carries up to MAX_DATA_LENGTH bytes per entry.
+    struct TxSummary {
+        uint256 id;
+        address to;
+        uint256 amount;
+        bool executed;
+        uint8 confirms;
+        bool isCanceled;
+        address txProposer;
+        uint8 cancelVoteCount;
+        uint64 createdBlock;
+        uint64 executedBlock;
+        bool[3] confirmedBy;
+        uint256 dataLength;
+    }
+
+    /// @notice Emitted when the safe receives native currency.
     event Deposit(address indexed from, uint256 amount, uint256 balance);
+    /// @notice Emitted when an owner creates a transaction.
     event TxCreated(uint256 indexed id, address indexed proposer, address indexed to, uint256 amount);
+    /// @notice Emitted when an owner confirms a transaction.
     event TxConfirmed(uint256 indexed id, address indexed owner, uint8 confirms);
+    /// @notice Emitted when an owner revokes a confirmation.
     event TxRevoked(uint256 indexed id, address indexed owner, uint8 confirms);
+    /// @notice Emitted when an owner votes to cancel a transaction.
     event TxCancelVoted(uint256 indexed id, address indexed owner, uint8 votes);
+    /// @notice Emitted when an owner withdraws a cancel vote.
     event TxCancelVoteRevoked(uint256 indexed id, address indexed owner, uint8 votes);
+    /// @notice Emitted when a transaction becomes canceled.
     event TxCanceled(uint256 indexed id, address indexed owner);
+    /// @notice Emitted when a transaction is executed.
     event TxExecuted(uint256 indexed id, address indexed executor, address indexed to, uint256 amount);
 
+    /// @notice Deploys a safe with three fixed owners.
+    /// @param _owners Three distinct, non-zero owner addresses.
     constructor(address[3] memory _owners) payable {
         _validateOwners(_owners);
         owners = _owners;
@@ -79,15 +155,30 @@ contract Save is ReentrancyGuard {
         }
     }
 
+    /// @notice Accepts plain native transfers into the safe.
     receive() external payable {
         emit Deposit(msg.sender, msg.value, address(this).balance);
     }
 
+    /// @dev Reverts unless all three owners are non-zero and distinct.
     function _validateOwners(address[3] memory o) internal pure {
-        require(o[0] != address(0) && o[1] != address(0) && o[2] != address(0), "zero owner");
-        require(o[0] != o[1] && o[0] != o[2] && o[1] != o[2], "owners must differ");
+        if (o[0] == address(0) || o[1] == address(0) || o[2] == address(0)) revert ZeroOwner();
+        if (o[0] == o[1] || o[0] == o[2] || o[1] == o[2]) revert OwnersMustDiffer();
     }
 
+    /// @dev Reverts unless the caller is one of the three owners.
+    function _onlyOwner() internal view {
+        if (!isOwner(msg.sender)) revert NotOwner();
+    }
+
+    /// @dev Reverts unless the transaction id exists.
+    function _validId(uint256 id) internal view {
+        if (id >= txs.length) revert BadId();
+    }
+
+    /// @notice Whether an address is one of the three owners.
+    /// @param a Address to check.
+    /// @return True if the address is an owner.
     function isOwner(address a) public view returns (bool) {
         for (uint256 i = 0; i < 3; i++) {
             if (owners[i] == a) return true;
@@ -95,54 +186,90 @@ contract Save is ReentrancyGuard {
         return false;
     }
 
+    /// @notice Returns the three owners in storage order.
+    /// @return The owner addresses.
     function getOwners() external view returns (address[3] memory) {
         return owners;
     }
 
+    /// @notice Total number of transactions ever created.
+    /// @return The transaction count.
     function txCount() external view returns (uint256) {
         return txs.length;
     }
 
-    /// Free balance: whatever is not already reserved by created transactions.
+    /// @notice Free balance: whatever is not already reserved by created transactions.
+    /// @return The spendable balance.
     function availableBalance() external view returns (uint256) {
         uint256 bal = address(this).balance;
         return bal > pendingAmount ? bal - pendingAmount : 0;
     }
 
-    /// Legacy signature, kept so the existing frontend does not break.
+    /// @notice Minimal transaction view.
+    /// @dev Deprecated: kept only so older frontend builds keep working. Use getTxFull or getTxs.
+    /// @param id Transaction id.
+    /// @return to Recipient address.
+    /// @return amount Native value to send.
+    /// @return executed Whether the transaction has been executed.
+    /// @return confirms Number of confirmations collected.
+    /// @return isCanceled Whether the transaction has been canceled.
     function getTx(uint256 id)
         external
         view
-        returns (address to, uint256 amount, bool executed, uint8 confirms_, bool isCanceled)
+        returns (address to, uint256 amount, bool executed, uint8 confirms, bool isCanceled)
     {
-        require(id < txs.length, "bad id");
+        _validId(id);
         Tx storage t = txs[id];
         return (t.to, t.amount, t.executed, t.confirms, canceled[id]);
     }
 
+    /// @notice Full snapshot of a single transaction, calldata included.
+    /// @param id Transaction id.
+    /// @return The transaction view.
     function getTxFull(uint256 id) external view returns (TxView memory) {
-        require(id < txs.length, "bad id");
+        _validId(id);
         return _txView(id);
     }
 
-    /// Batch read: one RPC call instead of one per entry.
-    /// from is the starting id, count is how many to return. The tail beyond the array is truncated.
+    /// @notice Batch read: one RPC call instead of one per entry.
+    /// @dev Each entry carries up to MAX_DATA_LENGTH bytes of calldata, so keep count small.
+    /// @param from Starting transaction id.
+    /// @param count How many entries to return; the tail beyond the array is truncated.
+    /// @return The requested transaction views.
     function getTxs(uint256 from, uint256 count) external view returns (TxView[] memory) {
-        uint256 len = txs.length;
-        if (from >= len || count == 0) {
-            return new TxView[](0);
-        }
-        uint256 end = from + count;
-        if (end > len) end = len;
-        uint256 n = end - from;
-
+        (uint256 start, uint256 n) = _range(from, count);
         TxView[] memory out = new TxView[](n);
         for (uint256 i = 0; i < n; i++) {
-            out[i] = _txView(from + i);
+            out[i] = _txView(start + i);
         }
         return out;
     }
 
+    /// @notice Batch read without calldata, for rendering long transaction lists.
+    /// @param from Starting transaction id.
+    /// @param count How many entries to return; the tail beyond the array is truncated.
+    /// @return The requested transaction summaries.
+    function getTxSummaries(uint256 from, uint256 count) external view returns (TxSummary[] memory) {
+        (uint256 start, uint256 n) = _range(from, count);
+        TxSummary[] memory out = new TxSummary[](n);
+        for (uint256 i = 0; i < n; i++) {
+            out[i] = _txSummary(start + i);
+        }
+        return out;
+    }
+
+    /// @dev Clamps a (from, count) request to the bounds of the transaction array.
+    function _range(uint256 from, uint256 count) internal view returns (uint256 start, uint256 n) {
+        uint256 len = txs.length;
+        if (from >= len || count == 0) {
+            return (0, 0);
+        }
+        uint256 end = from + count;
+        if (end > len) end = len;
+        return (from, end - from);
+    }
+
+    /// @dev Builds the full view for a transaction id.
     function _txView(uint256 id) internal view returns (TxView memory v) {
         Tx storage t = txs[id];
         v.id = id;
@@ -155,47 +282,76 @@ contract Save is ReentrancyGuard {
         v.cancelVoteCount = cancelVotes[id];
         v.createdBlock = t.createdBlock;
         v.executedBlock = t.executedBlock;
-        v.confirmedBy = [
-            confirmed[id][owners[0]],
-            confirmed[id][owners[1]],
-            confirmed[id][owners[2]]
-        ];
+        v.confirmedBy = _confirmedBy(id);
         v.data = t.data;
     }
 
+    /// @dev Builds the calldata-free summary for a transaction id.
+    function _txSummary(uint256 id) internal view returns (TxSummary memory v) {
+        Tx storage t = txs[id];
+        v.id = id;
+        v.to = t.to;
+        v.amount = t.amount;
+        v.executed = t.executed;
+        v.confirms = t.confirms;
+        v.isCanceled = canceled[id];
+        v.txProposer = proposer[id];
+        v.cancelVoteCount = cancelVotes[id];
+        v.createdBlock = t.createdBlock;
+        v.executedBlock = t.executedBlock;
+        v.confirmedBy = _confirmedBy(id);
+        v.dataLength = t.data.length;
+    }
+
+    /// @dev Confirmation flags for the three owners, in owners order.
+    function _confirmedBy(uint256 id) internal view returns (bool[3] memory) {
+        return [confirmed[id][owners[0]], confirmed[id][owners[1]], confirmed[id][owners[2]]];
+    }
+
+    /// @notice Whether a specific owner confirmed a specific transaction.
+    /// @param id Transaction id.
+    /// @param owner Owner address to check.
+    /// @return True if that owner has confirmed.
     function isConfirmed(uint256 id, address owner) external view returns (bool) {
-        require(id < txs.length, "bad id");
+        _validId(id);
         return confirmed[id][owner];
     }
 
-    /// Which of the three owners confirmed, in a single call, in owners order.
+    /// @notice Which of the three owners confirmed, in a single call, in owners order.
+    /// @param id Transaction id.
+    /// @return Confirmation flags aligned with owners.
     function getConfirms(uint256 id) external view returns (bool[3] memory) {
-        require(id < txs.length, "bad id");
-        return [
-            confirmed[id][owners[0]],
-            confirmed[id][owners[1]],
-            confirmed[id][owners[2]]
-        ];
+        _validId(id);
+        return _confirmedBy(id);
     }
 
-    /// Plain transfer. Kept for compatibility with the current frontend.
+    /// @notice Creates a plain native transfer.
+    /// @dev Kept for compatibility with the current frontend, which does not build calldata.
+    /// @param to Recipient address.
+    /// @param amount Native value to send.
+    /// @return The new transaction id.
     function createTx(address to, uint256 amount) external returns (uint256) {
         return _createTx(to, amount, "");
     }
 
-    /// Transfer with arbitrary calldata - the safe can call other contracts.
+    /// @notice Creates a transfer with arbitrary calldata, so the safe can call other contracts.
+    /// @param to Recipient or target contract.
+    /// @param amount Native value to send, may be zero.
+    /// @param data Calldata forwarded to the target, up to MAX_DATA_LENGTH bytes.
+    /// @return The new transaction id.
     function createTx(address to, uint256 amount, bytes calldata data) external returns (uint256) {
         return _createTx(to, amount, data);
     }
 
+    /// @dev Shared creation path: validates input, reserves the amount, appends the record.
     function _createTx(address to, uint256 amount, bytes memory data) internal returns (uint256) {
-        require(isOwner(msg.sender), "not owner");
-        require(to != address(0), "bad to");
-        require(amount > 0 || data.length > 0, "empty tx");
-        require(data.length <= MAX_DATA_LENGTH, "data too long");
+        _onlyOwner();
+        if (to == address(0)) revert BadRecipient();
+        if (amount == 0 && data.length == 0) revert EmptyTransaction();
+        if (data.length > MAX_DATA_LENGTH) revert DataTooLong();
 
         uint256 newPending = pendingAmount + amount;
-        require(address(this).balance >= newPending, "exceeds available balance");
+        if (address(this).balance < newPending) revert ExceedsAvailableBalance();
         pendingAmount = newPending;
 
         txs.push(
@@ -216,14 +372,16 @@ contract Save is ReentrancyGuard {
         return id;
     }
 
+    /// @notice Confirms a pending transaction.
+    /// @param id Transaction id.
     function confirmTx(uint256 id) external {
-        require(isOwner(msg.sender), "not owner");
-        require(id < txs.length, "bad id");
+        _onlyOwner();
+        _validId(id);
 
         Tx storage t = txs[id];
-        require(!t.executed, "done");
-        require(!canceled[id], "canceled");
-        require(!confirmed[id][msg.sender], "already confirmed");
+        if (t.executed) revert AlreadyExecuted();
+        if (canceled[id]) revert TransactionCanceled();
+        if (confirmed[id][msg.sender]) revert AlreadyConfirmed();
 
         confirmed[id][msg.sender] = true;
         t.confirms += 1;
@@ -231,15 +389,17 @@ contract Save is ReentrancyGuard {
         emit TxConfirmed(id, msg.sender, t.confirms);
     }
 
+    /// @notice Withdraws the caller's confirmation from a pending transaction.
+    /// @param id Transaction id.
     function revokeConfirm(uint256 id) external {
-        require(isOwner(msg.sender), "not owner");
-        require(id < txs.length, "bad id");
+        _onlyOwner();
+        _validId(id);
 
         Tx storage t = txs[id];
-        require(!t.executed, "done");
-        require(!canceled[id], "canceled");
-        require(confirmed[id][msg.sender], "not confirmed");
-        require(t.confirms > 0, "no confirms");
+        if (t.executed) revert AlreadyExecuted();
+        if (canceled[id]) revert TransactionCanceled();
+        if (!confirmed[id][msg.sender]) revert NotConfirmed();
+        if (t.confirms == 0) revert NoConfirmations();
 
         confirmed[id][msg.sender] = false;
         t.confirms -= 1;
@@ -247,20 +407,20 @@ contract Save is ReentrancyGuard {
         emit TxRevoked(id, msg.sender, t.confirms);
     }
 
-    /// Cancellation requires THRESHOLD owner votes.
-    /// Exception: the proposer can cancel their own transaction alone,
-    /// as long as nobody else has confirmed it.
+    /// @notice Votes to cancel a pending transaction.
+    /// @dev Cancellation requires THRESHOLD owner votes. Exception: the proposer can
+    /// cancel their own transaction alone, as long as nobody else has confirmed it.
+    /// @param id Transaction id.
     function cancelTx(uint256 id) external {
-        require(isOwner(msg.sender), "not owner");
-        require(id < txs.length, "bad id");
+        _onlyOwner();
+        _validId(id);
 
         Tx storage t = txs[id];
-        require(!t.executed, "done");
-        require(!canceled[id], "already canceled");
+        if (t.executed) revert AlreadyExecuted();
+        if (canceled[id]) revert TransactionCanceled();
 
         bool soleProposer =
-            msg.sender == proposer[id] &&
-            (t.confirms == 0 || (t.confirms == 1 && confirmed[id][msg.sender]));
+            msg.sender == proposer[id] && (t.confirms == 0 || (t.confirms == 1 && confirmed[id][msg.sender]));
 
         if (soleProposer) {
             _markCanceled(id, t.amount);
@@ -268,7 +428,7 @@ contract Save is ReentrancyGuard {
             return;
         }
 
-        require(!cancelVoted[id][msg.sender], "already voted");
+        if (cancelVoted[id][msg.sender]) revert AlreadyVotedToCancel();
         cancelVoted[id][msg.sender] = true;
         cancelVotes[id] += 1;
 
@@ -280,26 +440,30 @@ contract Save is ReentrancyGuard {
         }
     }
 
+    /// @dev Marks a transaction canceled and frees its reserved amount.
     function _markCanceled(uint256 id, uint256 amount) internal {
         canceled[id] = true;
         _releasePending(amount);
     }
 
+    /// @dev Releases a reserved amount without underflowing.
     function _releasePending(uint256 amount) internal {
         if (amount == 0) return;
         if (pendingAmount >= amount) pendingAmount -= amount;
         else pendingAmount = 0;
     }
 
+    /// @notice Withdraws the caller's cancel vote.
+    /// @param id Transaction id.
     function revokeCancelVote(uint256 id) external {
-        require(isOwner(msg.sender), "not owner");
-        require(id < txs.length, "bad id");
+        _onlyOwner();
+        _validId(id);
 
         Tx storage t = txs[id];
-        require(!t.executed, "done");
-        require(!canceled[id], "canceled");
-        require(cancelVoted[id][msg.sender], "not voted");
-        require(cancelVotes[id] > 0, "no votes");
+        if (t.executed) revert AlreadyExecuted();
+        if (canceled[id]) revert TransactionCanceled();
+        if (!cancelVoted[id][msg.sender]) revert NotVotedToCancel();
+        if (cancelVotes[id] == 0) revert NoCancelVotes();
 
         cancelVoted[id][msg.sender] = false;
         cancelVotes[id] -= 1;
@@ -307,38 +471,56 @@ contract Save is ReentrancyGuard {
         emit TxCancelVoteRevoked(id, msg.sender, cancelVotes[id]);
     }
 
+    /// @notice Executes a transaction that has collected THRESHOLD confirmations.
+    /// @dev The executed flag is set before the external call, on top of nonReentrant.
+    /// @param id Transaction id.
     function executeTx(uint256 id) external nonReentrant {
-        require(isOwner(msg.sender), "not owner");
-        require(id < txs.length, "bad id");
+        _onlyOwner();
+        _validId(id);
 
         Tx storage t = txs[id];
 
-        require(!t.executed, "done");
-        require(!canceled[id], "canceled");
-        require(t.confirms >= THRESHOLD, "need 2 confirmations");
-        require(address(this).balance >= t.amount, "insufficient balance");
+        if (t.executed) revert AlreadyExecuted();
+        if (canceled[id]) revert TransactionCanceled();
+        if (t.confirms < THRESHOLD) revert NotEnoughConfirmations();
+        if (address(this).balance < t.amount) revert InsufficientBalance();
 
         t.executed = true;
         t.executedBlock = uint64(block.number);
         _releasePending(t.amount);
 
-        (bool ok, ) = payable(t.to).call{value: t.amount}(t.data);
-        require(ok, "transfer failed");
+        (bool ok,) = payable(t.to).call{value: t.amount}(t.data);
+        if (!ok) revert TransferFailed();
 
         emit TxExecuted(id, msg.sender, t.to, t.amount);
     }
 }
 
+/// @title SaveFactory
+/// @notice Deploys Save instances and indexes them by owner.
+/// @dev The factory embeds the full Save creation code, so Save's size counts
+/// against the factory's EIP-170 limit.
 contract SaveFactory {
+    /// @notice Maximum safe name length, in bytes.
     uint256 public constant MAX_NAME_LENGTH = 32;
 
+    /// @notice Safes indexed by owner address.
     mapping(address => address[]) public safesByOwner;
+
+    /// @notice Optional display name per safe.
     mapping(address => string) public safeNames;
+
+    /// @notice Owners recorded per safe at creation time.
     mapping(address => address[3]) public safeOwners;
 
+    /// @notice Emitted when a new safe is deployed.
     event SaveCreated(address indexed save, address[3] owners);
+    /// @notice Emitted when a safe is renamed.
     event SafeRenamed(address indexed safe, string name);
 
+    /// @notice Deploys a new safe, optionally funding it with the sent value.
+    /// @param owners Three distinct, non-zero owner addresses.
+    /// @return The address of the new safe.
     function createSave(address[3] memory owners) external payable returns (address) {
         _validateOwners(owners);
         Save s = new Save{value: msg.value}(owners);
@@ -353,31 +535,44 @@ contract SaveFactory {
         return address(s);
     }
 
+    /// @notice All safes an address co-owns.
+    /// @param owner Owner address.
+    /// @return The safe addresses.
     function getSafesForOwner(address owner) external view returns (address[] memory) {
         return safesByOwner[owner];
     }
 
+    /// @notice The three owners recorded for a safe.
+    /// @param safe Safe address.
+    /// @return The owner addresses.
     function getSafeOwners(address safe) external view returns (address[3] memory) {
         return safeOwners[safe];
     }
 
+    /// @notice Sets the display name of a safe. Callable by any of its owners.
+    /// @dev The limit is measured in bytes, not characters, so multi-byte names are shorter.
+    /// @param safe Safe address.
+    /// @param name New name, up to MAX_NAME_LENGTH bytes.
     function setSafeName(address safe, string calldata name) external {
         address[3] memory owners = safeOwners[safe];
-        require(
-            msg.sender == owners[0] || msg.sender == owners[1] || msg.sender == owners[2],
-            "not owner"
-        );
-        require(bytes(name).length <= MAX_NAME_LENGTH, "name too long");
+        if (msg.sender != owners[0] && msg.sender != owners[1] && msg.sender != owners[2]) {
+            revert NotOwner();
+        }
+        if (bytes(name).length > MAX_NAME_LENGTH) revert NameTooLong();
         safeNames[safe] = name;
         emit SafeRenamed(safe, name);
     }
 
+    /// @notice The display name of a safe, empty if unset.
+    /// @param safe Safe address.
+    /// @return The safe name.
     function getSafeName(address safe) external view returns (string memory) {
         return safeNames[safe];
     }
 
+    /// @dev Reverts unless all three owners are non-zero and distinct.
     function _validateOwners(address[3] memory o) internal pure {
-        require(o[0] != address(0) && o[1] != address(0) && o[2] != address(0), "zero owner");
-        require(o[0] != o[1] && o[0] != o[2] && o[1] != o[2], "owners must differ");
+        if (o[0] == address(0) || o[1] == address(0) || o[2] == address(0)) revert ZeroOwner();
+        if (o[0] == o[1] || o[0] == o[2] || o[1] == o[2]) revert OwnersMustDiffer();
     }
 }

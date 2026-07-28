@@ -21,7 +21,7 @@ contract FactoryTest is Test {
         string memory long = new string(10_000);
 
         vm.prank(a);
-        vm.expectRevert("name too long");
+        vm.expectRevert(NameTooLong.selector);
         f.setSafeName(safe, long);
     }
 
@@ -43,7 +43,7 @@ contract FactoryTest is Test {
         address stranger = makeAddr("stranger");
 
         vm.prank(stranger);
-        vm.expectRevert("not owner");
+        vm.expectRevert(NotOwner.selector);
         f.setSafeName(safe, "hack");
     }
 }

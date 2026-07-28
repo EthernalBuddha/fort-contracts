@@ -21,10 +21,13 @@ contract CancelTest is Test {
         vm.prank(a);
         uint256 id = save.createTx(dest, 1 ether);
 
-        vm.prank(a); save.confirmTx(id);
-        vm.prank(b); save.confirmTx(id);
+        vm.prank(a);
+        save.confirmTx(id);
+        vm.prank(b);
+        save.confirmTx(id);
 
-        vm.prank(c); save.cancelTx(id);   // один голос за отмену — мало
+        vm.prank(c); // один голос за отмену — мало
+        save.cancelTx(id);
 
         vm.prank(a);
         save.executeTx(id);
@@ -37,14 +40,18 @@ contract CancelTest is Test {
         vm.prank(a);
         uint256 id = save.createTx(dest, 1 ether);
 
-        vm.prank(a); save.confirmTx(id);
-        vm.prank(b); save.confirmTx(id);
+        vm.prank(a);
+        save.confirmTx(id);
+        vm.prank(b);
+        save.confirmTx(id);
 
-        vm.prank(c); save.cancelTx(id);
-        vm.prank(b); save.cancelTx(id);
+        vm.prank(c);
+        save.cancelTx(id);
+        vm.prank(b);
+        save.cancelTx(id);
 
         vm.prank(a);
-        vm.expectRevert("canceled");
+        vm.expectRevert(TransactionCanceled.selector);
         save.executeTx(id);
     }
 
@@ -53,10 +60,11 @@ contract CancelTest is Test {
         vm.prank(a);
         uint256 id = save.createTx(dest, 1 ether);
 
-        vm.prank(a); save.cancelTx(id);
+        vm.prank(a);
+        save.cancelTx(id);
 
         vm.prank(a);
-        vm.expectRevert("canceled");
+        vm.expectRevert(TransactionCanceled.selector);
         save.confirmTx(id);
     }
 
@@ -65,13 +73,18 @@ contract CancelTest is Test {
         vm.prank(a);
         uint256 id = save.createTx(dest, 1 ether);
 
-        vm.prank(a); save.confirmTx(id);
-        vm.prank(b); save.confirmTx(id);
+        vm.prank(a);
+        save.confirmTx(id);
+        vm.prank(b);
+        save.confirmTx(id);
 
-        vm.prank(c); save.cancelTx(id);
-        vm.prank(c); save.revokeCancelVote(id);
+        vm.prank(c);
+        save.cancelTx(id);
+        vm.prank(c);
+        save.revokeCancelVote(id);
 
-        vm.prank(b); save.cancelTx(id);   // снова только один голос
+        vm.prank(b); // снова только один голос
+        save.cancelTx(id);
 
         vm.prank(a);
         save.executeTx(id);
