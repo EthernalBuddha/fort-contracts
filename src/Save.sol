@@ -43,6 +43,8 @@ error InsufficientBalance();
 error TransferFailed();
 /// @dev Thrown when a safe name exceeds MAX_NAME_LENGTH bytes.
 error NameTooLong();
+/// @dev Thrown when cancelling a transaction that already reached THRESHOLD confirmations.
+error QuorumReached();
 
 /// @dev Reverts unless all three owners are non-zero and distinct.
 /// Shared by Save and SaveFactory. Free functions are always internal,
@@ -426,6 +428,7 @@ contract Save is ReentrancyGuard {
         if (t.executed) revert AlreadyExecuted();
         if (canceled[id]) revert TransactionCanceled();
 
+        if (t.confirms >= THRESHOLD) revert QuorumReached();
         bool soleProposer =
             msg.sender == proposer[id] && (t.confirms == 0 || (t.confirms == 1 && confirmed[id][msg.sender]));
 
