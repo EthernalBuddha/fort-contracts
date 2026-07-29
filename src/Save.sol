@@ -28,12 +28,14 @@ error AlreadyConfirmed();
 /// @dev Thrown when the caller has not confirmed the transaction.
 error NotConfirmed();
 /// @dev Thrown when there is no confirmation left to revoke.
+/// Unreachable while the confirmed/confirms invariant holds; kept as a defensive check.
 error NoConfirmations();
 /// @dev Thrown when the caller has already voted to cancel.
 error AlreadyVotedToCancel();
 /// @dev Thrown when the caller has not voted to cancel.
 error NotVotedToCancel();
 /// @dev Thrown when there is no cancel vote left to revoke.
+/// Unreachable while the cancelVoted/cancelVotes invariant holds; kept as a defensive check.
 error NoCancelVotes();
 /// @dev Thrown when the transaction has fewer than THRESHOLD confirmations.
 error NotEnoughConfirmations();
@@ -44,6 +46,8 @@ error TransferFailed();
 /// @dev Thrown when a safe name exceeds MAX_NAME_LENGTH bytes.
 error NameTooLong();
 /// @dev Thrown when cancelling a transaction that already reached THRESHOLD confirmations.
+/// Such a transaction is not stuck: any confirming owner can call revokeConfirm first, which
+/// drops the count below THRESHOLD and re-enables the normal cancel flow.
 error QuorumReached();
 
 /// @dev Reverts unless all three owners are non-zero and distinct.
@@ -61,7 +65,15 @@ function _validateOwners(address[3] memory o) pure {
 /// Reentrancy protection comes from OpenZeppelin's ReentrancyGuard; executeTx also
 /// follows checks-effects-interactions, so the guard is a second line of defence.
 contract Save is ReentrancyGuard {
-    /// @notice Number of confirmations required to execute or cancel a transaction.
+    /// @notice Number of confirmations required to execute a transaction, and number of cancel
+    /// votes required to cancel one that has not yet reached that many confirmations.
+    /// @dev Cancellation is deliberately not symmetric with execution. Once confirms reaches
+    /// THRESHOLD the transaction can no longer be canceled at all, so that a cancel vote cannot
+    /// race an execution that is already authorized. To unwind such a transaction, one of the
+    /// confirming owners calls revokeConfirm first; the count drops below THRESHOLD and the
+    /// normal cancel flow becomes available again. The same path is the way out of a transaction
+    /// whose recipient always reverts: it can never execute, and until a confirmation is revoked
+    /// its amount keeps reducing availableBalance().
     uint8 public constant THRESHOLD = 2;
 
     /// @notice Maximum calldata size, in bytes, accepted by a transaction.
@@ -102,6 +114,8 @@ contract Save is ReentrancyGuard {
 
     /// @notice Total amount across all created transactions that are neither executed nor canceled.
     /// @dev Prevents committing more funds than the contract currently holds.
+    /// Native currency only: a transaction that moves ERC-20 tokens through its calldata reserves
+    /// nothing here, so availableBalance() makes no statement about token balances.
     uint256 public pendingAmount;
 
     /// @notice Flat transaction snapshot, readable in a single call.
@@ -157,17 +171,22 @@ contract Save is ReentrancyGuard {
 
     /// @notice Deploys a safe with three fixed owners.
     /// @param _owners Three distinct, non-zero owner addresses.
+    /// @dev No Deposit event is emitted for the initial funding. When the safe is deployed through
+    /// SaveFactory, msg.sender here is the factory rather than the account that actually sent the
+    /// funds, so the event would name the wrong depositor. The deployment transaction itself
+    /// already records that transfer.
     constructor(address[3] memory _owners) payable {
         _validateOwners(_owners);
         owners = _owners;
-        if (msg.value > 0) {
-            emit Deposit(msg.sender, msg.value, address(this).balance);
-        }
     }
 
     /// @notice Accepts plain native transfers into the safe.
+    /// @dev Zero-value calls are accepted silently; emitting Deposit for them would only add noise
+    /// to the event log.
     receive() external payable {
-        emit Deposit(msg.sender, msg.value, address(this).balance);
+        if (msg.value > 0) {
+            emit Deposit(msg.sender, msg.value, address(this).balance);
+        }
     }
 
     /// @dev Reverts unless the caller is one of the three owners.
@@ -210,7 +229,8 @@ contract Save is ReentrancyGuard {
     }
 
     /// @notice Minimal transaction view.
-    /// @dev Deprecated: kept only so older frontend builds keep working. Use getTxFull or getTxs.
+    /// @dev Deprecated: kept only so older frontend builds keep working. Use getTxFull for a
+    /// single transaction, or getTxSummaries for lists; getTxs is deprecated as well.
     /// @param id Transaction id.
     /// @return to Recipient address.
     /// @return amount Native value to send.
@@ -265,14 +285,15 @@ contract Save is ReentrancyGuard {
     }
 
     /// @dev Clamps a (from, count) request to the bounds of the transaction array.
+    /// The remaining length is computed by subtraction rather than by adding from and count,
+    /// so a huge count cannot overflow into a Panic in a public view function.
     function _range(uint256 from, uint256 count) internal view returns (uint256 start, uint256 n) {
         uint256 len = txs.length;
         if (from >= len || count == 0) {
             return (0, 0);
         }
-        uint256 end = from + count;
-        if (end > len) end = len;
-        return (from, end - from);
+        uint256 remaining = len - from;
+        return (from, count < remaining ? count : remaining);
     }
 
     /// @dev Builds the full view for a transaction id.
@@ -315,6 +336,9 @@ contract Save is ReentrancyGuard {
     }
 
     /// @notice Whether a specific owner confirmed a specific transaction.
+    /// @dev The address is not checked against the owner set: a non-owner simply returns false,
+    /// which is indistinguishable from an owner who has not confirmed. Callers that need that
+    /// distinction should read getOwners or getConfirms instead.
     /// @param id Transaction id.
     /// @param owner Owner address to check.
     /// @return True if that owner has confirmed.
@@ -408,6 +432,8 @@ contract Save is ReentrancyGuard {
         if (t.executed) revert AlreadyExecuted();
         if (canceled[id]) revert TransactionCanceled();
         if (!confirmed[id][msg.sender]) revert NotConfirmed();
+        // Defensive only: confirmed and confirms are always written together, so a caller that
+        // passed the check above necessarily contributed to a non-zero count.
         if (t.confirms == 0) revert NoConfirmations();
 
         confirmed[id][msg.sender] = false;
@@ -473,6 +499,8 @@ contract Save is ReentrancyGuard {
         if (t.executed) revert AlreadyExecuted();
         if (canceled[id]) revert TransactionCanceled();
         if (!cancelVoted[id][msg.sender]) revert NotVotedToCancel();
+        // Defensive only: cancelVoted and cancelVotes are always written together, so a caller
+        // that passed the check above necessarily contributed to a non-zero count.
         if (cancelVotes[id] == 0) revert NoCancelVotes();
 
         cancelVoted[id][msg.sender] = false;
