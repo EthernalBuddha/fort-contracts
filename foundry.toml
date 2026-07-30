@@ -8,5 +8,10 @@ solc = "0.8.35"
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
 
+[profile.default.invariant]
+runs = 256
+depth = 128
+fail_on_revert = false
+
 [rpc_endpoints]
 arc = "https://rpc.testnet.arc.network"
