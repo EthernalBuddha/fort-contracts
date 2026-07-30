@@ -7,6 +7,10 @@ import {Save} from "../src/Save.sol";
 /// @title Bounded driver for Save.
 /// @notice The fuzzer calls this contract, never Save directly: random senders
 /// would bounce off NotOwner and never reach interesting states.
+/// @dev Every call swallows ordinary reverts, which are legitimate here
+/// (QuorumReached, AlreadyConfirmed, ExceedsAvailableBalance and friends), but
+/// re-throws Panic. An arithmetic panic such as an underflow in _releasePending
+/// is exactly what this suite hunts for and must never be caught silently.
 contract PendingHandler is Test {
     Save public save;
     address[3] public owners;
@@ -20,6 +24,8 @@ contract PendingHandler is Test {
     uint256 public canceled;
     uint256 public executed; // reached by the purely random call sequence
     uint256 public chainExecuted; // reached by the scripted happy path
+    uint256 public chainRevoked; // reached by the scripted revoke path
+    uint256 public chainCanceled; // cancelled after dropping below THRESHOLD
 
     constructor(Save _save, address[3] memory _owners) {
         save = _save;
@@ -38,6 +44,8 @@ contract PendingHandler is Test {
         vm.prank(owner);
         try save.createTx(to, amount) returns (uint256) {
             created++;
+        } catch Panic(uint256 code) {
+            _reportPanic("createTx", code);
         } catch {}
     }
 
@@ -49,6 +57,8 @@ contract PendingHandler is Test {
         vm.prank(owner);
         try save.confirmTx(id) {
             confirmed++;
+        } catch Panic(uint256 code) {
+            _reportPanic("confirmTx", code);
         } catch {}
     }
 
@@ -60,6 +70,8 @@ contract PendingHandler is Test {
         vm.prank(owner);
         try save.revokeConfirm(id) {
             revoked++;
+        } catch Panic(uint256 code) {
+            _reportPanic("revokeConfirm", code);
         } catch {}
     }
 
@@ -71,6 +83,8 @@ contract PendingHandler is Test {
         vm.prank(owner);
         try save.cancelTx(id) {
             canceled++;
+        } catch Panic(uint256 code) {
+            _reportPanic("cancelTx", code);
         } catch {}
     }
 
@@ -82,6 +96,8 @@ contract PendingHandler is Test {
         vm.prank(owner);
         try save.executeTx(id) {
             executed++;
+        } catch Panic(uint256 code) {
+            _reportPanic("executeTx", code);
         } catch {}
     }
 
@@ -97,6 +113,9 @@ contract PendingHandler is Test {
         try save.createTx(to, amount) returns (uint256 newId) {
             created++;
             id = newId;
+        } catch Panic(uint256 code) {
+            _reportPanic("chain.createTx", code);
+            return;
         } catch {
             return;
         }
@@ -104,17 +123,100 @@ contract PendingHandler is Test {
         vm.prank(owners[1]);
         try save.confirmTx(id) {
             confirmed++;
+        } catch Panic(uint256 code) {
+            _reportPanic("chain.confirmTx", code);
         } catch {}
 
         vm.prank(owners[2]);
         try save.confirmTx(id) {
             confirmed++;
+        } catch Panic(uint256 code) {
+            _reportPanic("chain.confirmTx", code);
         } catch {}
 
         vm.prank(owners[0]);
         try save.executeTx(id) {
             chainExecuted++;
+        } catch Panic(uint256 code) {
+            _reportPanic("chain.executeTx", code);
         } catch {}
+    }
+
+    /// @notice Scripted worst case for pendingAmount: a transaction climbs to
+    /// quorum, falls back below THRESHOLD through revokeConfirm, and is then
+    /// canceled. Random sequences hit this once per run at best, because
+    /// revokeConfirm only succeeds for an owner that confirmed that exact id.
+    function createConfirmRevokeCancel(uint256 toSeed, uint256 amount) external {
+        address to = recipients[bound(toSeed, 0, 3)];
+        amount = bound(amount, 1, 1 ether);
+
+        uint256 id;
+        vm.prank(owners[0]);
+        try save.createTx(to, amount) returns (uint256 newId) {
+            created++;
+            id = newId;
+        } catch Panic(uint256 code) {
+            _reportPanic("chain.createTx", code);
+            return;
+        } catch {
+            return;
+        }
+
+        // Climb to quorum.
+        vm.prank(owners[1]);
+        try save.confirmTx(id) {
+            confirmed++;
+        } catch Panic(uint256 code) {
+            _reportPanic("chain.confirmTx", code);
+        } catch {}
+
+        vm.prank(owners[2]);
+        try save.confirmTx(id) {
+            confirmed++;
+        } catch Panic(uint256 code) {
+            _reportPanic("chain.confirmTx", code);
+        } catch {}
+
+        // Fall back below THRESHOLD so that cancelling becomes legal again.
+        vm.prank(owners[1]);
+        try save.revokeConfirm(id) {
+            revoked++;
+            chainRevoked++;
+        } catch Panic(uint256 code) {
+            _reportPanic("chain.revokeConfirm", code);
+        } catch {}
+
+        vm.prank(owners[2]);
+        try save.revokeConfirm(id) {
+            revoked++;
+            chainRevoked++;
+        } catch Panic(uint256 code) {
+            _reportPanic("chain.revokeConfirm", code);
+        } catch {}
+
+        // Cancel. The proposer may be able to cancel alone; the second vote is
+        // a no-op in that case.
+        vm.prank(owners[0]);
+        try save.cancelTx(id) {
+            canceled++;
+            chainCanceled++;
+        } catch Panic(uint256 code) {
+            _reportPanic("chain.cancelTx", code);
+        } catch {}
+
+        vm.prank(owners[2]);
+        try save.cancelTx(id) {
+            canceled++;
+        } catch Panic(uint256 code) {
+            _reportPanic("chain.cancelTx", code);
+        } catch {}
+    }
+
+    /// @dev Turns a swallowed Panic into a loud failure. Code 0x11 is an
+    /// arithmetic overflow or underflow, 0x32 an out of bounds array access.
+    function _reportPanic(string memory where, uint256 code) internal pure {
+        console2.log("PANIC in", where, code);
+        revert("Save panicked");
     }
 }
 
@@ -132,13 +234,14 @@ contract PendingInvariantTest is Test {
         save = new Save{value: 100 ether}(owners);
         handler = new PendingHandler(save, owners);
 
-        bytes4[] memory selectors = new bytes4[](6);
+        bytes4[] memory selectors = new bytes4[](7);
         selectors[0] = PendingHandler.createTx.selector;
         selectors[1] = PendingHandler.confirmTx.selector;
         selectors[2] = PendingHandler.revokeConfirm.selector;
         selectors[3] = PendingHandler.cancelTx.selector;
         selectors[4] = PendingHandler.executeTx.selector;
         selectors[5] = PendingHandler.createConfirmExecute.selector;
+        selectors[6] = PendingHandler.createConfirmRevokeCancel.selector;
 
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
@@ -170,10 +273,13 @@ contract PendingInvariantTest is Test {
         console2.log("canceled     ", handler.canceled());
         console2.log("executed     ", handler.executed());
         console2.log("chainExecuted", handler.chainExecuted());
+        console2.log("chainRevoked ", handler.chainRevoked());
+        console2.log("chainCanceled", handler.chainCanceled());
 
         assertGt(handler.created(), 0, "fuzzer created nothing");
         assertGt(handler.confirmed(), 0, "fuzzer confirmed nothing");
         assertGt(handler.canceled(), 0, "fuzzer canceled nothing");
+        assertGt(handler.chainRevoked(), 0, "fuzzer revoked nothing");
         assertGt(
             handler.executed() + handler.chainExecuted(),
             0,
