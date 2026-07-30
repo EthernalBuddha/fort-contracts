@@ -1,89 +1,135 @@
 # FORT contracts
 
-Solidity sources for FORT, a 2-of-3 multisig safe on Arc Testnet. Built with Foundry.
+Solidity contracts behind [FORT](https://fortsafe.vercel.app): a 2-of-3 multisig safe for
+Arc Testnet, where gas is paid in USDC. Foundry project, MIT licensed.
 
-Frontend: [fortsafe.vercel.app](https://fortsafe.vercel.app/) вЂ” source in [EthernalBuddha/FORT](https://github.com/EthernalBuddha/FORT).
+The frontend lives in a separate repository; this one holds the canonical contract source.
 
 ## Contracts
 
-`src/Save.sol` holds both contracts.
+### `Save`
 
-### Save
+The safe itself. Three fixed owners set in the constructor, threshold of two.
 
-A safe with three fixed owners and a threshold of two. Owners and threshold are set in the constructor and cannot change: moving to N-of-M would touch the constructor, the factory and the frontend, so it is out of scope.
+- Native transfers and arbitrary contract calls (`bytes data`, up to 4096 bytes).
+- Reserved funds tracking: every open transaction holds its amount in `pendingAmount`,
+  so `availableBalance()` is what can still be committed. Without it, several transactions
+  could each be created against the full balance and all but the first would fail at
+  execution time.
+- Block numbers of creation and execution are stored on-chain, so the frontend can find a
+  transaction hash by scanning a single block instead of a wide range. Without this the
+  hashes only existed in `localStorage`, and history was not cross-device.
+- Batch reads: `getTxSummaries` for lists (bounded response size), `getTxs` and
+  `getTxFull` when calldata is actually needed.
+- Reentrancy: OpenZeppelin `ReentrancyGuard` on `executeTx`, plus
+  checks-effects-interactions. The `executed` flag is set and the reserve released before
+  the external call.
 
-- Create, confirm, revoke, cancel and execute native transfers.
-- A transfer executes with 2 of 3 confirmations.
-- A transfer is canceled with 2 of 3 cancel votes. Exception: the proposer can cancel their own transfer alone, as long as no other owner has confirmed it.
-- Transfers may carry calldata (up to `MAX_DATA_LENGTH` = 4096 bytes), so the safe can call other contracts.
-- Reads are batched through `getTxs` and `getTxSummaries`; the latter omits calldata and therefore has a bounded response size.
+### `SaveFactory`
 
-### SaveFactory
+Deploys safes and indexes them: `getSafesForOwner`, `safeOwners`, `getSafeOwners`, and
+optional names limited to 32 **bytes**, not characters. The limit applies to the UTF-8
+encoded length.
 
-Deploys `Save` instances, indexes them by owner and stores safe names on chain (`MAX_NAME_LENGTH` = 32 bytes, only an owner can rename). The factory embeds the full `Save` creation code, so `Save`'s size counts against the factory's EIP-170 limit.
+## Design decisions
 
-## Design notes
+**Access control restricts actions, not reads.** All state is public on-chain and readable
+by anyone over RPC. `view` functions have no owner checks because such checks would be
+theatre. What is actually protected is the right to create, confirm, cancel and execute.
 
-**Access control is enforced on actions, not on reading.** Only an owner can create, confirm, revoke, cancel or execute. All safe state is readable by anyone through public view functions and directly from the chain, so the contents of a safe are public information.
+**Cancellation is asymmetric on purpose.** Cancelling needs two votes, same as executing.
+Otherwise any single owner could veto legitimate payments of the other two. The one
+exception: the proposer may cancel their own transaction alone, as long as nobody else has
+confirmed it. Once quorum is reached, cancellation reverts with `QuorumReached`, so a
+confirmed transaction cannot lose a race against a cancel vote. The way out of a bad but
+confirmed transaction is `revokeConfirm` first, then cancel.
 
-**Reserved amounts.** Every created transfer reserves its amount in `pendingAmount`, so `availableBalance()` is lower than the raw balance while transfers are pending. Creation is checked against the available balance, execution against the full balance. Native currency only: a transfer that moves ERC-20 tokens through its calldata reserves nothing, so `availableBalance()` makes no statement about token balances.
+**A reverting recipient can pin the reserve.** If the destination rejects the transfer,
+`executeTx` reverts as a whole and the amount stays in `pendingAmount`, lowering
+`availableBalance()`. Recovery is `revokeConfirm` followed by `cancelTx`, which releases
+the reserve. This is covered by `test_RevertingRecipientLocksFundsUntilCancel`.
 
-**Cancellation is deliberately not symmetric with execution.** Once `confirms` reaches the threshold the transfer can no longer be canceled, so that a cancel vote cannot race an execution that is already authorized. The way to unwind such a transfer is `revokeConfirm`: the count drops below the threshold and the normal cancel flow becomes available again.
+**Errors are custom errors, not revert strings.** Cheaper, and revert strings would
+otherwise sit in the deployed bytecode. Clients need the selectors to decode them.
 
-That same path is the only way out of a transfer whose recipient always reverts. It can never execute, and its amount would otherwise stay reserved forever, lowering `availableBalance()` for everyone. `test_RevertingRecipientLocksFundsUntilCancel` covers the full recovery.
+**Owners and threshold are immutable.** N-of-M and owner rotation would change the
+constructor, the factory and the whole frontend, and are deliberately out of scope.
 
-**Reentrancy.** `executeTx` is the only function that calls out of the contract. It follows checks-effects-interactions вЂ” the `executed` flag and the reserve release are written before the external call вЂ” and carries OpenZeppelin's `nonReentrant` as a second line of defence. `test_ReentrantOwnerCannotDrainSafe` exercises an owner contract that re-enters from its `receive` hook.
+## Layout
+
+```
+src/Save.sol          Save and SaveFactory
+script/Deploy.s.sol   DeployFactory (no constructor args)
+test/                 36 tests in 6 files
+```
+
+| Test file | Covers |
+| --- | --- |
+| `Cancel.t.sol` | Two-vote cancellation, sole-proposer branch, revoking a cancel vote |
+| `Factory.t.sol` | Name length limit in bytes, only owners may rename |
+| `Guards.t.sol` | Owner validation and access checks |
+| `Pending.t.sol` | Reserves, `ExceedsAvailableBalance`, release on cancel and execution, block numbers, calldata limits, batch slices |
+| `Reentrancy.t.sol` | Reentrant owner cannot drain, pinned reserve and its recovery, both `BadRecipient` branches, confirmation and double-execution guards |
+| `Summaries.t.sol` | `getTxSummaries` matches `getTxFull` field by field, identical slice clamping |
+
+## Build and test
+
+Dependencies are git submodules, so a plain `git clone` will not compile:
+
+```bash
+git clone --recurse-submodules https://github.com/EthernalBuddha/fort-contracts.git
+cd fort-contracts
+forge build --sizes
+forge test
+```
+
+Already cloned without submodules: `git submodule update --init --recursive`.
+
+Pinned dependencies: `forge-std` v1.16.2 and `openzeppelin-contracts` v5.6.1, with the
+remapping in `remappings.txt`.
+
+The optimizer is enabled with 200 runs and `solc` is pinned to 0.8.35 in `foundry.toml`.
+Both matter: `SaveFactory` embeds the `Save` bytecode and exceeds the EIP-170 limit of
+24576 bytes without optimization, and verification only reproduces with the exact same
+settings.
 
 ## Deployment
 
-| | |
-| --- | --- |
-| Network | Arc Testnet |
-| ChainId | `5042002` |
-| RPC | https://rpc.testnet.arc.network |
-| Currency | USDC (also the gas token) |
-| Explorer | https://testnet.arcscan.app |
-| Faucet | https://faucet.circle.com |
-| SaveFactory | `0xc965e062f93F35507DF0F9E9a3973F04704215dA` (block 54284174) |
+| Contract | Address | Status |
+| --- | --- | --- |
+| `SaveFactory` | `0xc965e062f93F35507DF0F9E9a3973F04704215dA` | Live, verified, block 54284174 |
+| `Save` (test safe) | `0x77c92939Bd7f35bd8e2899d1393B8632542E0553` | Live |
 
-Events: `SaveCreated`, `SafeRenamed` on the factory; `Deposit`, `TxCreated`, `TxConfirmed`, `TxRevoked`, `TxCancelVoted`, `TxCancelVoteRevoked`, `TxCanceled`, `TxExecuted` on each safe.
+Network: Arc Testnet, chain id 5042002, RPC `https://rpc.testnet.arc.network`, explorer
+`https://testnet.arcscan.app`, faucet `https://faucet.circle.com`. Gas and balances are
+denominated in USDC.
 
-## Development
+Deploy. The key lives in an encrypted Foundry keystore, never in `.env`:
 
-Requires [Foundry](https://getfoundry.sh). The compiler version is pinned to `0.8.35`.
-
-Clone with submodules вЂ” `lib/forge-std` and `lib/openzeppelin-contracts` (pinned to `v5.6.1`) are git submodules:
-
-```sh
-git clone --recurse-submodules https://github.com/EthernalBuddha/fort-contracts.git
+```bash
+forge script script/Deploy.s.sol:DeployFactory \
+  --rpc-url arc \
+  --account <keystore-account> \
+  --sender <deployer-address> \
+  --broadcast
 ```
 
-If the repository is already cloned:
+Verify on Blockscout. `Save` needs its constructor arguments in the order returned by
+`getOwners()`:
 
-```sh
-git submodule update --init --recursive
+```bash
+forge verify-contract <address> src/Save.sol:SaveFactory \
+  --verifier blockscout \
+  --verifier-url https://testnet.arcscan.app/api \
+  --compiler-version 0.8.35 \
+  --num-of-optimizations 200 \
+  --watch
 ```
 
-Build, test and format:
-
-```sh
-forge build
-forge test
-forge fmt
-```
-
-## Tests
-
-32 tests across five files:
-
-| File | Covers |
-| --- | --- |
-| `Pending.t.sol` | reserved amounts, batch reads, calldata limits, owner gating |
-| `Cancel.t.sol` | cancel votes, quorum rules, sole-proposer cancel, vote revocation |
-| `Reentrancy.t.sol` | reentrancy guard, stuck reserve recovery, recipient validation, execution guards |
-| `Guards.t.sol` | `Deposit` events, out-of-range read arguments |
-| `Factory.t.sol` | safe names, rename permissions |
+Note that the metadata hash embedded in the bytecode covers the full source, comments and
+SPDX header included, so verifying an address requires the exact source it was deployed
+from.
 
 ## License
 
-MIT
+MIT, see `LICENSE`.
