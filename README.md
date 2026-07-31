@@ -1,5 +1,7 @@
 # FORT contracts
 
+[![CI](https://github.com/EthernalBuddha/fort-contracts/actions/workflows/test.yml/badge.svg?branch=master)](https://github.com/EthernalBuddha/fort-contracts/actions/workflows/test.yml)
+
 Solidity contracts behind [FORT](https://fortsafe.vercel.app): a 2-of-3 multisig safe for
 Arc Testnet, where gas is paid in USDC. Foundry project, MIT licensed.
 
