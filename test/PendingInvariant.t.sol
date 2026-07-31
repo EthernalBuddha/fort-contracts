@@ -228,8 +228,7 @@ contract PendingInvariantTest is Test {
     PendingHandler internal handler;
 
     function setUp() public {
-        address[3] memory owners =
-            [makeAddr("owner0"), makeAddr("owner1"), makeAddr("owner2")];
+        address[3] memory owners = [makeAddr("owner0"), makeAddr("owner1"), makeAddr("owner2")];
 
         save = new Save{value: 100 ether}(owners);
         handler = new PendingHandler(save, owners);
@@ -261,6 +260,12 @@ contract PendingInvariantTest is Test {
         }
 
         assertEq(save.pendingAmount(), sum, "pendingAmount drifted from open tx sum");
+
+        // Independent check: the safe can never reserve more than it holds.
+        // assertEq above catches accounting drift between pendingAmount and the
+        // open transactions; this one catches a reservation that outgrew the
+        // actual balance, which is what would make executeTx unpayable.
+        assertLe(save.pendingAmount(), address(save).balance, "pendingAmount exceeds safe balance");
     }
 
     /// @notice Guard against a green but empty run. This cannot be an invariant_
@@ -280,10 +285,6 @@ contract PendingInvariantTest is Test {
         assertGt(handler.confirmed(), 0, "fuzzer confirmed nothing");
         assertGt(handler.canceled(), 0, "fuzzer canceled nothing");
         assertGt(handler.chainRevoked(), 0, "fuzzer revoked nothing");
-        assertGt(
-            handler.executed() + handler.chainExecuted(),
-            0,
-            "fuzzer executed nothing"
-        );
+        assertGt(handler.executed() + handler.chainExecuted(), 0, "fuzzer executed nothing");
     }
 }

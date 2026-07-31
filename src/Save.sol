@@ -485,8 +485,11 @@ contract Save is ReentrancyGuard {
     /// @dev Releases a reserved amount without underflowing.
     function _releasePending(uint256 amount) internal {
         if (amount == 0) return;
-        if (pendingAmount >= amount) pendingAmount -= amount;
-        else pendingAmount = 0;
+        if (amount >= pendingAmount) {
+            pendingAmount = 0;
+        } else {
+            pendingAmount -= amount;
+        }
     }
 
     /// @notice Withdraws the caller's cancel vote.
@@ -575,10 +578,53 @@ contract SaveFactory {
     }
 
     /// @notice All safes an address co-owns.
+    /// @dev Unbounded: the returned array grows with every safe the address is
+    /// added to, so a large owner can push this call past the node gas limit.
+    /// Prefer safesCountForOwner plus getSafesForOwnerPaged for anything that
+    /// has to keep working as the list grows.
     /// @param owner Owner address.
     /// @return The safe addresses.
     function getSafesForOwner(address owner) external view returns (address[] memory) {
         return safesByOwner[owner];
+    }
+
+    /// @notice How many safes an address co-owns.
+    /// @dev Read this first, then page through with getSafesForOwnerPaged.
+    /// @param owner Owner address.
+    /// @return The number of safes recorded for the owner.
+    function safesCountForOwner(address owner) external view returns (uint256) {
+        return safesByOwner[owner].length;
+    }
+
+    /// @notice A slice of the safes an address co-owns.
+    /// @dev Bounds are clamped rather than rejected: an offset past the end
+    /// returns an empty array and a limit past the end is trimmed, so a caller
+    /// paging blindly to the end never reverts.
+    /// The window length is computed by subtracting offset from the total rather
+    /// than by adding offset and limit, so a caller passing type(uint256).max as
+    /// limit cannot overflow into a Panic. Same approach as Save._range.
+    /// @param owner Owner address.
+    /// @param offset Index of the first safe to return.
+    /// @param limit Maximum number of safes to return.
+    /// @return The safe addresses in the requested window.
+    function getSafesForOwnerPaged(address owner, uint256 offset, uint256 limit)
+        external
+        view
+        returns (address[] memory)
+    {
+        address[] storage all = safesByOwner[owner];
+        uint256 total = all.length;
+
+        if (offset >= total || limit == 0) return new address[](0);
+
+        uint256 remaining = total - offset;
+        uint256 n = limit < remaining ? limit : remaining;
+
+        address[] memory page = new address[](n);
+        for (uint256 i = 0; i < n; i++) {
+            page[i] = all[offset + i];
+        }
+        return page;
     }
 
     /// @notice The three owners recorded for a safe.
